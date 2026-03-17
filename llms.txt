@@ -1,0 +1,245 @@
+# Koin Playground Apps — Reference Implementations
+
+> Two production-quality Android applications demonstrating the same multi-module architecture with Koin DI — one using Annotations, one using the Safe DSL. Use these as reference for generating Koin code.
+
+## Key Facts
+
+- **Koin**: 4.2
+- **Compiler Plugin**: 0.4.1
+- **Kotlin**: 2.3.20
+- **Repository**: https://github.com/InsertKoinIO/playground-apps
+- **Documentation**: https://insert-koin.io/docs/reference/koin-compiler/compile-safety
+
+## Two Identical Apps, Two DI Approaches
+
+Both apps implement the same multi-module Android application (inspired by Now in Android) with identical features but different DI styles:
+
+### app-annotations/ — Annotation-Based DI
+
+Uses `@Singleton`, `@Factory`, `@KoinViewModel`, `@KoinWorker`, `@Module`, `@ComponentScan`, `@Configuration`, `@KoinApplication`, custom `@Qualifier` annotations.
+
+### app-dsl/ — Safe DSL-Based DI
+
+Uses `single<T>()`, `factory<T>()`, `viewModel<T>()`, `worker<T>()`, `create(::function)`, `bind`, `includes()`, `activityScope { scoped<T>() }`.
+
+Both are compile-safe — validated by the Koin Compiler Plugin at build time.
+
+## Module Structure
+
+```
+app-*/
+├── app/                    # Application bootstrap + main ViewModels
+├── core/
+│   ├── common/             # Dispatchers, custom @Qualifier
+│   ├── model/              # Data classes
+│   ├── database/           # Room database + DAOs
+│   ├── datastore/          # DataStore preferences
+│   ├── network/            # HTTP client + API
+│   ├── data/               # Repositories (offline-first)
+│   ├── domain/             # Use cases
+│   ├── analytics/          # Analytics service
+│   └── notifications/      # Notification management
+├── feature/
+│   ├── home/               # Home screen
+│   ├── bookmarks/          # Bookmarks
+│   ├── settings/           # Settings
+│   └── detail/             # Detail screen
+└── sync/
+    └── work/               # WorkManager background sync
+```
+
+## Key Patterns Demonstrated
+
+### Bootstrap
+
+**Annotations:**
+```kotlin
+@KoinApplication
+class StressTestApplication : Application() {
+    override fun onCreate() {
+        super.onCreate()
+        startKoin<StressTestApplication> {
+            androidLogger(Level.DEBUG)
+            androidContext(this@StressTestApplication)
+            workManagerFactory()
+        }
+    }
+}
+```
+
+**DSL:**
+```kotlin
+class StressTestApplication : Application() {
+    override fun onCreate() {
+        super.onCreate()
+        startKoin {
+            androidLogger(Level.DEBUG)
+            androidContext(this@StressTestApplication)
+            workManagerFactory()
+            modules(appModule)
+        }
+    }
+}
+```
+
+### Module Definitions
+
+**Annotations — Module with provider functions:**
+```kotlin
+@Module
+internal object DatabaseModule {
+    @Singleton
+    fun providesDatabase(context: Context): AppDatabase =
+        Room.databaseBuilder(context, AppDatabase::class.java, "my-db").build()
+}
+
+@Module(includes = [DatabaseModule::class])
+@Configuration
+class DaosModule {
+    @Singleton
+    fun providesTopicDao(database: AppDatabase): TopicDao = database.topicDao()
+}
+```
+
+**DSL — Module with create():**
+```kotlin
+fun database(context: Context): AppDatabase =
+    Room.databaseBuilder(context, AppDatabase::class.java, "my-db").build()
+
+fun topicDao(db: AppDatabase): TopicDao = db.topicDao()
+
+val databaseModule = module {
+    single { create(::database) }
+    single { create(::topicDao) }
+}
+```
+
+### Custom Qualifiers
+
+```kotlin
+@Qualifier
+@Retention(AnnotationRetention.RUNTIME)
+annotation class Dispatcher(val niaDispatcher: NiaDispatchers)
+
+enum class NiaDispatchers { Default, IO }
+```
+
+**Annotations:**
+```kotlin
+@Module @Configuration
+class DispatchersModule {
+    @Singleton @Dispatcher(NiaDispatchers.IO)
+    fun providesIODispatcher(): CoroutineDispatcher = Dispatchers.IO
+}
+```
+
+**DSL:**
+```kotlin
+@Dispatcher(NiaDispatchers.IO)
+fun dispatcherIO(): CoroutineDispatcher = Dispatchers.IO
+
+val dispatchersModule = module {
+    single { create(::dispatcherIO) }
+}
+```
+
+### Interface Binding
+
+**DSL:**
+```kotlin
+val dataModule = module {
+    includes(databaseModule, dataStoreModule, networkModule)
+    single<OfflineFirstNewsRepository>() bind NewsRepository::class
+    single<OfflineFirstUserDataRepository>() bind UserDataRepository::class
+}
+```
+
+**Annotations — automatic (implements interface):**
+```kotlin
+@Singleton
+class OfflineFirstNewsRepository(
+    private val newsDao: NewsResourceDao,
+    private val network: NetworkDataSource,
+) : NewsRepository
+```
+
+### ViewModel with Navigation Parameters
+
+**Annotations:**
+```kotlin
+@KoinViewModel
+class DetailViewModel(
+    private val newsRepository: NewsRepository,
+    @InjectedParam val newsId: String,
+) : ViewModel()
+```
+
+**DSL:**
+```kotlin
+class DetailViewModel(
+    private val newsRepository: NewsRepository,
+    @InjectedParam val newsId: String = "",
+) : ViewModel()
+
+// In module:
+viewModel<DetailViewModel>()
+```
+
+**Compose call site:**
+```kotlin
+@Composable
+fun DetailScreen(newsId: String, viewModel: DetailViewModel = koinViewModel(key = newsId) { parametersOf(newsId) }) {
+}
+```
+
+### Activity with Scope
+
+```kotlin
+class MainActivity : ComponentActivity(), AndroidScopeComponent {
+    override val scope: Scope by activityScope()
+    private val viewModel: MainActivityViewModel by viewModel()
+    private val activityTracker: ActivityTracker by inject()
+}
+```
+
+### App Module Composition (DSL)
+
+```kotlin
+val appModule = module {
+    includes(dispatchersModule, databaseModule, dataStoreModule, networkModule, dataModule, syncModule)
+    factory<GetFollowableTopicsUseCase>()
+    viewModel<MainActivityViewModel>()
+    viewModel<HomeViewModel>()
+    viewModel<DetailViewModel>()
+    activityScope {
+        scoped<ActivityTracker>()
+    }
+}
+```
+
+### Worker
+
+**Annotations:**
+```kotlin
+@KoinWorker
+class SyncWorker(
+    context: Context,
+    params: WorkerParameters,
+    private val topicsRepository: TopicsRepository,
+    @Dispatcher(NiaDispatchers.IO) private val ioDispatcher: CoroutineDispatcher,
+) : CoroutineWorker(context, params)
+```
+
+**DSL:**
+```kotlin
+val syncModule = module {
+    single<WorkManagerSyncManager>() bind SyncManager::class
+    worker<SyncWorker>()
+}
+```
+
+## Related Repositories
+
+- **Koin**: https://github.com/InsertKoinIO/koin — core framework
+- **Compiler Plugin**: https://github.com/InsertKoinIO/koin-compiler-plugin — compile-time safety
+- **Website**: https://insert-koin.io — documentation
