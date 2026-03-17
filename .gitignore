@@ -47,3 +47,5 @@ captures/
 
 # Kotlin
 .kotlin
+*/.idea
+.claude/settings.local.json
